@@ -1,0 +1,2 @@
+ #!/bin/sh
+exec sudo -E $HOME/go/bin/dlv --only-same-user=false $@
