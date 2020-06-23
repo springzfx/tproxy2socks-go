@@ -12,6 +12,9 @@ import (
 	"unsafe"
 )
 
+// IPV6_RECVORIGDSTADDR see https://github.com/torvalds/linux/blob/63bdf4284c38a48af21745ceb148a087b190cd21/include/uapi/linux/in6.h#L286
+const IPV6_RECVORIGDSTADDR = 0x4a
+
 // ListenUDP tproxy udp listen
 func ListenUDP(addr string) (*net.UDPConn, error) {
 	laddr, err := net.ResolveUDPAddr("udp", addr)
@@ -40,6 +43,12 @@ func ListenUDP(addr string) (*net.UDPConn, error) {
 		return nil, err
 	}
 
+	if laddr.IP.To4() == nil {
+		if err = syscall.SetsockoptInt(int(f.Fd()), syscall.SOL_IPV6, IPV6_RECVORIGDSTADDR, 1); err != nil {
+			return nil, err
+		}
+	}
+
 	return uconn, nil
 }
 
@@ -63,31 +72,30 @@ func ReadFromUDP(conn *net.UDPConn, b []byte) (int, *net.UDPAddr, *net.UDPAddr, 
 			if err = binary.Read(bytes.NewReader(msg.Data), binary.LittleEndian, originalDstRaw); err != nil {
 				return 0, nil, nil, fmt.Errorf("reading original destination address: %s", err)
 			}
+			pp := (*syscall.RawSockaddrInet4)(unsafe.Pointer(originalDstRaw))
+			p := (*[2]byte)(unsafe.Pointer(&pp.Port))
+			originalDst = &net.UDPAddr{
+				IP:   net.IPv4(pp.Addr[0], pp.Addr[1], pp.Addr[2], pp.Addr[3]),
+				Port: int(p[0])<<8 + int(p[1]),
+			}
 
-			switch originalDstRaw.Family {
-			case syscall.AF_INET:
-				pp := (*syscall.RawSockaddrInet4)(unsafe.Pointer(originalDstRaw))
-				p := (*[2]byte)(unsafe.Pointer(&pp.Port))
-				originalDst = &net.UDPAddr{
-					IP:   net.IPv4(pp.Addr[0], pp.Addr[1], pp.Addr[2], pp.Addr[3]),
-					Port: int(p[0])<<8 + int(p[1]),
-				}
+		}
 
-			case syscall.AF_INET6:
-				pp := (*syscall.RawSockaddrInet6)(unsafe.Pointer(originalDstRaw))
-				p := (*[2]byte)(unsafe.Pointer(&pp.Port))
-				originalDst = &net.UDPAddr{
-					IP:   net.IP(pp.Addr[:]),
-					Port: int(p[0])<<8 + int(p[1]),
-					Zone: strconv.Itoa(int(pp.Scope_id)),
-				}
-
-			default:
-				return 0, nil, nil, fmt.Errorf("original destination is an unsupported network family")
+		if msg.Header.Level == syscall.SOL_IPV6 && msg.Header.Type == IPV6_RECVORIGDSTADDR {
+			originalDstRaw := &syscall.RawSockaddrInet6{}
+			if err = binary.Read(bytes.NewReader(msg.Data), binary.LittleEndian, originalDstRaw); err != nil {
+				return 0, nil, nil, fmt.Errorf("reading original destination address: %s", err)
+			}
+			pp := (*syscall.RawSockaddrInet6)(unsafe.Pointer(originalDstRaw))
+			p := (*[2]byte)(unsafe.Pointer(&pp.Port))
+			originalDst = &net.UDPAddr{
+				IP:   net.IP(pp.Addr[:]),
+				Port: int(p[0])<<8 + int(p[1]),
+				Zone: strconv.Itoa(int(pp.Scope_id)),
 			}
 		}
-	}
 
+	}
 	if originalDst == nil {
 		return 0, nil, nil, fmt.Errorf("unable to obtain original destination: %s", err)
 	}
@@ -144,7 +152,7 @@ func udpAddrToSocketAddr(addr *net.UDPAddr) (syscall.Sockaddr, error) {
 
 		zoneID, err := strconv.ParseUint(addr.Zone, 10, 32)
 		if err != nil {
-			return nil, err
+			zoneID = 0
 		}
 
 		return &syscall.SockaddrInet6{Addr: ip, Port: addr.Port, ZoneId: uint32(zoneID)}, nil

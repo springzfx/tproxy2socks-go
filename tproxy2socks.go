@@ -7,10 +7,14 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/springzfx/tproxy2socks-go/socks5"
 	"github.com/springzfx/tproxy2socks-go/tproxy"
 )
+
+// ConnTimeout read and write timeout
+const ConnTimeout time.Duration = 10
 
 type tproxyAddrT []string
 
@@ -73,7 +77,8 @@ func startTCPListen(addr string) {
 					return
 				}
 				defer outConn.Close()
-				bridge(inConn, outConn)
+				bridge(inConn, outConn, false)
+				defer log.Println("tcp connection closed")
 			}()
 		}
 	}()
@@ -93,7 +98,7 @@ func startUDPListen(addr string) {
 				log.Println("udp tproxy read error,", err)
 				continue
 			}
-			// log.Println("read from udp", srcaddr, dstaddr)
+			// log.Println("read from udp", srcAddr, dstAddr)
 			go func() {
 				inConn, err := tproxy.BindAndConnectUDP(dstAddr, srcAddr)
 				if err != nil {
@@ -102,7 +107,7 @@ func startUDPListen(addr string) {
 				}
 				log.Println("udp:", inConn.RemoteAddr(), "->", inConn.LocalAddr())
 				defer inConn.Close()
-				_outConn, err := socks5.ConnectUDP(dstAddr.String())
+				_outConn, err := socks5.ConnectUDP(inConn.LocalAddr().String())
 				if err != nil {
 					log.Println("udp outConn connect error:", err)
 					return
@@ -114,16 +119,21 @@ func startUDPListen(addr string) {
 					return
 				}
 				// log.Println(inConn.RemoteAddr(), outConn.RemoteAddr())
-				bridge(inConn, outConn)
+				bridge(inConn, outConn, true)
+				// defer log.Println("udp connection closed")
 			}()
 		}
 	}()
 }
 
-func bridge(inConn, outConn net.Conn) {
+func bridge(inConn, outConn net.Conn, setTimeout bool) {
 	flag := make(chan int)
-	streamConn := func(dst io.Writer, src io.Reader) {
+	streamConn := func(dst, src net.Conn) {
 		for {
+			if setTimeout {
+				src.SetDeadline(time.Now().Add(ConnTimeout * time.Second))
+				dst.SetDeadline(time.Now().Add(ConnTimeout * time.Second))
+			}
 			n, err := io.Copy(dst, src)
 			if err != nil || n == 0 {
 				break
@@ -136,6 +146,4 @@ func bridge(inConn, outConn net.Conn) {
 	go streamConn(outConn, inConn)
 
 	<-flag
-	log.Println("bridge exit")
-	return
 }
